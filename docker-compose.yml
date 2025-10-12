@@ -44,5 +44,9 @@ services:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
       GF_DATABASE_SSL_MODE: disable
+      GF_INSTALL_PLUGINS: golioth-websocket-datasource
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      # GF_FEATURE_TOGGLES_ENABLE: "live live-config live-pipeline"
     volumes:
       - ./grafana-data:/var/lib/grafana

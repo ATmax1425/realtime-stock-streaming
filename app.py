@@ -23,28 +23,43 @@ SYMBOLS = ["NIFTY", "BANKNIFTY", "RELIANCE", "TCS", "INFY"]
 # --------------------------
 class ConnectionManager:
     def __init__(self):
-        self.active: set[WebSocket] = set()
+        self.global_clients: set[WebSocket] = set()
+        self.symbol_clients: dict[str, set[WebSocket]] = {}
         self.lock = asyncio.Lock()
 
-    async def connect(self, ws: WebSocket):
+    async def connect(self, ws: WebSocket, symbol: str | None = None):
         await ws.accept()
-        async with self.lock:
-            self.active.add(ws)
+        async with self.lock: 
+            if symbol:
+                if symbol not in self.symbol_clients:
+                    self.symbol_clients[symbol] = set()
+                self.symbol_clients[symbol].add(ws)
+            else:
+                self.global_clients.add(ws)
 
-    async def disconnect(self, ws: WebSocket):
+    async def disconnect(self, ws: WebSocket, symbol: str| None = None):
         async with self.lock:
-            self.active.discard(ws)
+            if symbol and symbol in self.symbol_clients:
+                self.symbol_clients[symbol].discard(ws)
+                if not self.symbol_clients[symbol]:
+                    del self.symbol_clients[symbol]
+            else:
+                self.global_clients.discard(ws)
 
-    async def broadcast(self, message: str):
+    async def broadcast(self, message: dict):
+        symbol = message["symbol"]
+        message_str = {k: str(v) for k, v in message.items()}
         async with self.lock:
-            to_drop = []
-            for ws in list(self.active):
+            for ws in self.symbol_clients.get(symbol, set()):
                 try:
-                    await ws.send_text(message)
+                    await ws.send_json(message_str)
                 except Exception:
-                    to_drop.append(ws)
-            for ws in to_drop:
-                self.active.discard(ws)
+                    self.symbol_clients[symbol].discard(ws)
+            for ws in self.global_clients:
+                try:
+                    await ws.send_json(message_str)
+                except Exception:
+                    self.global_clients.discard(ws)
 
 manager = ConnectionManager()
 
@@ -79,10 +94,10 @@ async def tick_producer_task():
         while True:
             ts = datetime.now(timezone.utc)
 
-            if not is_market_open(ts):
-                # Market closed → sleep until next minute
-                await asyncio.sleep(60)
-                continue
+            # if not is_market_open(ts):
+            #     # Market closed → sleep until next minute
+            #     await asyncio.sleep(60)
+            #     continue
 
             market_factor = random.gauss(0, 0.001)
 
@@ -125,7 +140,7 @@ async def kafka_consumer_task():
     await consumer.start()
     try:
         async for msg in consumer:
-            raw = msg.value.decode("utf-8")
+            raw = json.loads(msg.value.decode("utf-8"))
             await manager.broadcast(raw)
     finally:
         await consumer.stop()
@@ -154,16 +169,28 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def root():
-    return {"msg": "Real-time Kafka → FastAPI → WebSocket demo", "ws": "/ws"}
+    return {"msg": "Real-time Kafka → FastAPI → WebSocket demo", "ws": "/ws", "symbol": "/ws/{symbol}"}
 
+#TODO add some security
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
+async def websocket_global(ws: WebSocket):
+    print("connecting")
     await manager.connect(ws)
     try:
         while True:
             await asyncio.sleep(10)
     except WebSocketDisconnect:
         await manager.disconnect(ws)
+
+# tried to work with golioth-websocket-datasource
+@app.websocket("/ws/{symbol}")
+async def websocket_symbol(ws: WebSocket, symbol: str):
+    await manager.connect(ws, symbol)
+    try:
+        while True:
+            await asyncio.sleep(10)
+    except WebSocketDisconnect:
+        await manager.disconnect(ws, symbol)
 
 if __name__ == "__main__":
     uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
